@@ -62,6 +62,34 @@ class DocumentManager:
             return []
         return sorted([p.name.replace(".md", ".pdf") for p in self.markdown_dir.glob("*.md")])
     
+    def ingest_existing_markdowns(self):
+        self.rag_system.parent_store.clear_store()
+        self.rag_system.vector_db.delete_collection(self.rag_system.collection_name)
+        self.rag_system.vector_db.create_collection(self.rag_system.collection_name)
+
+        md_files = sorted(self.markdown_dir.glob("*.md"))
+        if not md_files:
+            print("Auto-ingestion: no .md files found.")
+            return 0, 0
+
+        added, skipped = 0, 0
+        for md_path in md_files:
+            try:
+                parent_chunks, child_chunks = self.rag_system.chunker.create_chunks_single(md_path)
+                if not child_chunks:
+                    skipped += 1
+                    continue
+                collection = self.rag_system.vector_db.get_collection(self.rag_system.collection_name)
+                collection.add_documents(child_chunks)
+                self.rag_system.parent_store.save_many(parent_chunks)
+                added += 1
+            except Exception as e:
+                print(f"Auto-ingestion error [{md_path.name}]: {e}")
+                skipped += 1
+
+        print(f"Auto-ingestion complete: {added} added, {skipped} skipped.")
+        return added, skipped
+
     def clear_all(self):
         self.markdown_dir.mkdir(parents=True, exist_ok=True)
         clear_directory_contents(self.markdown_dir)

@@ -9,8 +9,9 @@ ASSETS_DIR = os.path.join(os.path.dirname(__file__), "..", "assets")
 def create_gradio_ui():
     rag_system = RAGSystem()
     rag_system.initialize()
-    
+
     doc_manager = DocumentManager(rag_system)
+    doc_manager.ingest_existing_markdowns()
     chat_interface = ChatInterface(rag_system)
     
     def format_file_list():
