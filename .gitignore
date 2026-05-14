@@ -1,6 +1,6 @@
 .DS_Store
 qdrant_db/
-markdown_docs/
+# markdown_docs/ is now version-controlled (curated knowledge base)
 parent_store/
 docs/
 __pycache__/
