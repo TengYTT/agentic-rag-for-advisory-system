@@ -212,6 +212,7 @@ Students may choose **up to two specialisations**:
 | Cyber Security Engineering |
 | Information Technology |
 | Internetworking |
+| Data Science and Engineering |
 
 > Full subject listings for each specialisation:  
 > https://www.handbook.unsw.edu.au/postgraduate/specialisations/2026/
