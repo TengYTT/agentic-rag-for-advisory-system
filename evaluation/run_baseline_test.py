@@ -1,6 +1,17 @@
+"""
+Run baseline test questions against the RAG system and save results.
+
+Usage:
+    python run_baseline_test.py                              # English questions, baseline_results_en.md
+    python run_baseline_test.py --lang zh                    # Chinese questions, baseline_results_zh.md
+    python run_baseline_test.py --output custom_name.md      # English questions, custom filename
+    python run_baseline_test.py --lang en --output baseline_results_v2_english_docs_en.md
+"""
+
+import argparse
 import os
-import sys
 import re
+import sys
 from datetime import datetime
 
 # Add project/ to path so we can import project modules directly
@@ -11,31 +22,46 @@ from core.document_manager import DocumentManager
 from core.chat_interface import ChatInterface
 
 # ---------------------------------------------------------------------------
-# Test questions
+# Config
 # ---------------------------------------------------------------------------
 
-QUESTIONS = [
-    "我是國際學生，大學讀商科（行銷）背景，想申請 UTS Master of IT，我符合入學資格嗎？",
-    "非 IT 背景的學生申請 UNSW Master of IT，需要補修哪些先修課程？GPA 不到 3.0 的學生可以申請嗎？",
-    "UTS MIT 和 UNSW MIT 有什麼差別？",
-    "UTS MIT 和 UNSW MIT 的英文門檻需要幾分？如果我的英文程度比較一般的話，建議以哪一個為主要的申請目標？",
-    "UTS MIT 和 UNSW MIT 國際學生的學費比較",
-    "UTS MIT 和 UNSW MIT 課程是幾年制的？可以兼職就讀嗎？",
-    "UNSW MIT 2026 年的申請截止日期是什麼時候？現在申請來得及嗎？最快現在可以申請的是哪一個入學時間？有沒有開條件式錄取？",
-    "我看到不同地方說的英文門檻不一樣，UNSW MIT 官方要求到底是雅思 6.5 還是 6.0？對應 PTE 要考多少分？",
-    "移民局和學校說的學生簽證要求有出入，以哪個為準？",
-    "請比較 UTS 和 UNSW 的 Master of IT，列出課程方向、費用、入學門檻、申請截止日期、課程特色、學校優缺點等差異。",
-]
+QUESTIONS_FILE = os.path.join(os.path.dirname(__file__), "test_questions.md")
+KNOWLEDGE_BASE = "Curated markdown knowledge base (UTS_Master_of_IT.md, UNSW_Master_of_IT.md)"
 
-KNOWLEDGE_BASE = "Markdown 文件（UTS_Master_of_IT.md, UNSW_Master_of_IT.md）"
+# ---------------------------------------------------------------------------
+# Question loader
+# ---------------------------------------------------------------------------
 
-OUTPUT_PATH = os.path.join(os.path.dirname(__file__), "baseline", "baseline_results.md")
+def load_questions(filepath, lang="en"):
+    """
+    Parse bilingual test_questions.md.
+    Returns list of (label, question_text) e.g. [("Q1", "As an international..."), ("Q11a", "...")]
+    lang: "en" -> extract **EN:** lines; "zh" -> extract **ZH:** lines
+    """
+    pattern_heading = re.compile(r"^### (Q\d+[ab]?)$", re.MULTILINE)
+    pattern_en = re.compile(r"^\*\*EN:\*\*\s*(.+)$", re.MULTILINE)
+    pattern_zh = re.compile(r"^\*\*ZH:\*\*\s*(.+)$", re.MULTILINE)
+
+    with open(filepath, encoding="utf-8") as f:
+        content = f.read()
+
+    headings = [(m.group(1), m.start()) for m in pattern_heading.finditer(content)]
+    results = []
+    for i, (label, start) in enumerate(headings):
+        end = headings[i + 1][1] if i + 1 < len(headings) else len(content)
+        block = content[start:end]
+        pattern = pattern_zh if lang == "zh" else pattern_en
+        m = pattern.search(block)
+        if m:
+            results.append((label, m.group(1).strip()))
+
+    return results
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def run_question(chat_interface, rag_system, question):
+def run_question(chat_interface, rag_system, question, clarification_reply):
     """Run a single question through the RAG pipeline and return (answer, sources, clarification_triggered)."""
     rag_system.reset_thread()
 
@@ -51,7 +77,7 @@ def run_question(chat_interface, rag_system, question):
 
     if has_clarification:
         print("    [clarification triggered — sending follow-up]")
-        for msgs in chat_interface.chat("請直接用現有資訊回答，不需要澄清。", []):
+        for msgs in chat_interface.chat(clarification_reply, []):
             final_messages = msgs
 
     # Extract plain answer (messages with no metadata = final LLM output)
@@ -73,35 +99,49 @@ def run_question(chat_interface, rag_system, question):
     return answer, sorted(sources), has_clarification
 
 
-def format_result(idx, question, answer, sources, clarification_triggered, timestamp):
-    source_str = ", ".join(sources) if sources else "（未偵測到來源）"
-    clarification_note = "\n> ⚠️ 系統要求澄清，已自動回覆「請直接用現有資訊回答」繼續。\n" if clarification_triggered else ""
-    return f"""## Q{idx}：{question}
+def format_result(label, question, answer, sources, clarification_triggered, timestamp):
+    source_str = ", ".join(sources) if sources else "(none detected)"
+    clarification_note = "\n> ⚠️ System triggered clarification; auto-replied to continue with available information.\n" if clarification_triggered else ""
+    return f"""## {label}: {question}
 {clarification_note}
-**測試時間：** {timestamp}
-**知識庫狀態：** {KNOWLEDGE_BASE}
+**Timestamp:** {timestamp}
+**Knowledge Base:** {KNOWLEDGE_BASE}
 
-**系統回答：**
+**System Response:**
 {answer}
 
-**Sources：**
-{source_str}
+**Sources:** {source_str}
 
-**初步評估：**
-- 正確性：待人工確認
-- 有無引用來源：待確認
-- 有無不確定性提示：待確認
+**Initial Assessment:**
+- Correctness: Pending manual review
+- Source Attribution: Pending manual review
+- Uncertainty Signaling: Pending manual review
 
 ---
 """
-
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
+    parser = argparse.ArgumentParser(description="Run baseline RAG evaluation test.")
+    parser.add_argument("--lang", choices=["en", "zh"], default="en",
+                        help="Question language to run (default: en)")
+    parser.add_argument("--output", default=None,
+                        help="Output filename (default: baseline_results_{lang}.md)")
+    args = parser.parse_args()
+
+    output_filename = args.output or f"baseline_results_{args.lang}.md"
+    output_path = os.path.join(os.path.dirname(__file__), "baseline", output_filename)
+    clarification_reply = (
+        "Please answer using the available information without further clarification."
+        if args.lang == "en"
+        else "請直接用現有資訊回答，不需要澄清。"
+    )
+
     print("\n=== Baseline Test ===")
+    print(f"Language: {args.lang} | Output: {output_filename}")
     print("Initializing RAG system...")
 
     rag_system = RAGSystem()
@@ -112,6 +152,7 @@ def main():
 
     chat_interface = ChatInterface(rag_system)
 
+    questions = load_questions(QUESTIONS_FILE, lang=args.lang)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     header = f"""# Baseline Test Results
@@ -119,6 +160,7 @@ def main():
 **測試時間：** {timestamp}
 **知識庫：** {KNOWLEDGE_BASE}
 **模型：** 依 config.py 設定（預設 Ollama 本地模型）
+**語言：** {args.lang.upper()}
 
 ---
 
@@ -126,18 +168,18 @@ def main():
 
     results = [header]
 
-    for i, question in enumerate(QUESTIONS, start=1):
-        print(f"\n[{i}/{len(QUESTIONS)}] {question[:60]}...")
-        answer, sources, clarification_triggered = run_question(chat_interface, rag_system, question)
-        result_block = format_result(i, question, answer, sources, clarification_triggered, timestamp)
+    for i, (label, question) in enumerate(questions, start=1):
+        print(f"\n[{i}/{len(questions)}] [{label}] {question[:60]}...")
+        answer, sources, clarification_triggered = run_question(chat_interface, rag_system, question, clarification_reply)
+        result_block = format_result(label, question, answer, sources, clarification_triggered, timestamp)
         results.append(result_block)
         print(f"    → done. sources: {sources or '(none)'}")
 
-    os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
-    with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
         f.writelines(results)
 
-    print(f"\n測試完成，共 {len(QUESTIONS)} 題，結果已存入 {OUTPUT_PATH}")
+    print(f"\n測試完成，共 {len(questions)} 題，結果已存入 {output_path}")
 
 
 if __name__ == "__main__":
