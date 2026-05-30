@@ -60,7 +60,7 @@ class DocumentManager:
     def get_markdown_files(self):
         if not self.markdown_dir.exists():
             return []
-        return sorted([p.name.replace(".md", ".pdf") for p in self.markdown_dir.glob("*.md")])
+        return sorted([p.name for p in self.markdown_dir.glob("*.md")])
     
     def ingest_existing_markdowns(self):
         self.rag_system.parent_store.clear_store()
