@@ -1,5 +1,7 @@
 import os
 import glob
+import re
+import yaml
 import config
 from pathlib import Path
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
@@ -7,11 +9,11 @@ from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharac
 class DocumentChuncker:
     def __init__(self):
         self.__parent_splitter = MarkdownHeaderTextSplitter(
-            headers_to_split_on=config.HEADERS_TO_SPLIT_ON, 
+            headers_to_split_on=config.HEADERS_TO_SPLIT_ON,
             strip_headers=False
         )
         self.__child_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=config.CHILD_CHUNK_SIZE, 
+            chunk_size=config.CHILD_CHUNK_SIZE,
             chunk_overlap=config.CHILD_CHUNK_OVERLAP
         )
         self.__min_parent_size = config.MIN_PARENT_SIZE
@@ -25,29 +27,32 @@ class DocumentChuncker:
             parent_chunks, child_chunks = self.create_chunks_single(doc_path)
             all_parent_chunks.extend(parent_chunks)
             all_child_chunks.extend(child_chunks)
-        
+
         return all_parent_chunks, all_child_chunks
 
     def create_chunks_single(self, md_path):
         doc_path = Path(md_path)
-        
+
         with open(doc_path, "r", encoding="utf-8") as f:
-            parent_chunks = self.__parent_splitter.split_text(f.read())
-        
+            raw_content = f.read()
+
+        yaml_meta, clean_content = self.__parse_yaml_front_matter(raw_content)
+        parent_chunks = self.__parent_splitter.split_text(clean_content)
+
         merged_parents = self.__merge_small_parents(parent_chunks)
         split_parents = self.__split_large_parents(merged_parents)
         cleaned_parents = self.__clean_small_chunks(split_parents)
-        
+
         all_parent_chunks, all_child_chunks = [], []
-        self.__create_child_chunks(all_parent_chunks, all_child_chunks, cleaned_parents, doc_path)
+        self.__create_child_chunks(all_parent_chunks, all_child_chunks, cleaned_parents, doc_path, yaml_meta)
         return all_parent_chunks, all_child_chunks
 
     def __merge_small_parents(self, chunks):
         if not chunks:
             return []
-        
+
         merged, current = [], None
-        
+
         for chunk in chunks:
             if current is None:
                 current = chunk
@@ -62,7 +67,7 @@ class DocumentChuncker:
             if len(current.page_content) >= self.__min_parent_size:
                 merged.append(current)
                 current = None
-        
+
         if current:
             if merged:
                 merged[-1].page_content += "\n\n" + current.page_content
@@ -73,12 +78,12 @@ class DocumentChuncker:
                         merged[-1].metadata[k] = v
             else:
                 merged.append(current)
-        
+
         return merged
 
     def __split_large_parents(self, chunks):
         split_chunks = []
-        
+
         for chunk in chunks:
             if len(chunk.page_content) <= self.__max_parent_size:
                 split_chunks.append(chunk)
@@ -89,12 +94,12 @@ class DocumentChuncker:
                 )
                 sub_chunks = splitter.split_documents([chunk])
                 split_chunks.extend(sub_chunks)
-        
+
         return split_chunks
 
     def __clean_small_chunks(self, chunks):
         cleaned = []
-        
+
         for i, chunk in enumerate(chunks):
             if len(chunk.page_content) < self.__min_parent_size:
                 if cleaned:
@@ -115,13 +120,44 @@ class DocumentChuncker:
                     cleaned.append(chunk)
             else:
                 cleaned.append(chunk)
-        
+
         return cleaned
 
-    def __create_child_chunks(self, all_parent_pairs, all_child_chunks, parent_chunks, doc_path):
+    @staticmethod
+    def __parse_yaml_front_matter(content):
+        """Extract YAML front matter; return (meta_dict, stripped_content).
+        Falls back to ({}, original_content) if no front matter or parse error.
+        """
+        pattern = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
+        match = pattern.match(content)
+        if not match:
+            return {}, content
+        try:
+            meta = yaml.safe_load(match.group(1)) or {}
+        except yaml.YAMLError:
+            meta = {}
+
+        # Qdrant payload must be JSON-serializable. PyYAML parses ISO date strings
+        # (e.g. 2026-05-15) into datetime.date objects, which Qdrant rejects.
+        # Cast to str at the parsing source so downstream code doesn't need to worry.
+        if "last_retrieved" in meta and meta["last_retrieved"] is not None:
+            meta["last_retrieved"] = str(meta["last_retrieved"])
+
+        return meta, content[match.end():].lstrip("\n")
+
+    def __create_child_chunks(self, all_parent_pairs, all_child_chunks, parent_chunks, doc_path, yaml_meta=None):
+        if yaml_meta is None:
+            yaml_meta = {}
         for i, p_chunk in enumerate(parent_chunks):
             parent_id = f"{doc_path.stem}_parent_{i}"
-            p_chunk.metadata.update({"source": doc_path.name, "parent_id": parent_id})
-            
+            p_chunk.metadata.update({
+                "source": doc_path.name,
+                "parent_id": parent_id,
+                "source_tier": yaml_meta.get("source_tier"),
+                "source_type": yaml_meta.get("source_type", "unknown"),
+                "primary_url": yaml_meta.get("primary_url"),
+                "last_retrieved": yaml_meta.get("last_retrieved"),
+            })
+
             all_parent_pairs.append((parent_id, p_chunk))
             all_child_chunks.extend(self.__child_splitter.split_documents([p_chunk]))
