@@ -265,9 +265,9 @@ def _load_source_metadata(filename: str, markdown_dir: str = MARKDOWN_DIR) -> di
         "last_retrieved": last_retrieved,
     }
 
-def _build_final_message(aggregated_text: str, sub_answers: list) -> str:
-    """Wrap LLM-aggregated answer with low-confidence banner (if any) and
-    trust footer. Both are code-generated from metadata, not LLM-generated.
+def _build_final_message(aggregated_text: str, sub_answers: list) -> tuple:
+    """Returns (final_text, sources_metadata_dict).
+    sources_metadata_dict maps filename → metadata dict, for audit logging.
     """
     any_low_conf = any(a.get("low_confidence", False) for a in sub_answers)
     banner = (
@@ -280,6 +280,7 @@ def _build_final_message(aggregated_text: str, sub_answers: list) -> str:
     source_filenames = {m.group(1) for m in re.finditer(r"\b([\w\-]+\.md)\b", aggregated_text)}
 
     footer_lines = ["\n\n📊 **Trust Signals**"]
+    sources_metadata = {}
     if not source_filenames:
         footer_lines.append(
             "- ℹ️ No internal source documents were used. "
@@ -288,6 +289,7 @@ def _build_final_message(aggregated_text: str, sub_answers: list) -> str:
     else:
         for filename in sorted(source_filenames):
             meta = _load_source_metadata(filename)
+            sources_metadata[filename] = meta
             footer_lines.append(f"- 🏛️ **{filename}**")
             if meta["tier"] is not None:
                 footer_lines.append(f"  - Source Tier: {meta['tier']} ({meta['source_type'] or 'unknown'})")
@@ -296,7 +298,8 @@ def _build_final_message(aggregated_text: str, sub_answers: list) -> str:
             if meta["last_retrieved"]:
                 footer_lines.append(f"  - 📅 Retrieved: {meta['last_retrieved']}")
 
-    return banner + aggregated_text + "\n".join(footer_lines)
+    final_text = banner + aggregated_text + "\n".join(footer_lines)
+    return final_text, sources_metadata
 
 def aggregate_answers(state: State, llm):
     if not state.get("agent_answers"):
@@ -311,5 +314,17 @@ def aggregate_answers(state: State, llm):
     user_message = HumanMessage(content=f"""Original user question: {state["originalQuery"]}\nRetrieved answers:{formatted_answers}""")
     synthesis_response = llm.invoke([SystemMessage(content=get_aggregation_prompt()), user_message])
     aggregated_text = synthesis_response.content
-    final_text = _build_final_message(aggregated_text, sorted_answers)
+    final_text, sources_metadata = _build_final_message(aggregated_text, sorted_answers)
+
+    try:
+        from audit.audit_logger import log_query
+        log_query(
+            query=state.get("originalQuery", ""),
+            answer_text=final_text,
+            sub_answers=sorted_answers,
+            sources_metadata=sources_metadata,
+        )
+    except Exception as e:
+        print(f"[aggregate_answers] audit log failed: {e}")
+
     return {"messages": [AIMessage(content=final_text)]}
