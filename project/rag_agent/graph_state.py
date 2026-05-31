@@ -28,3 +28,10 @@ class AgentState(MessagesState):
     agent_answers: List[dict] = []
     tool_call_count: Annotated[int, operator.add] = 0
     iteration_count: Annotated[int, operator.add] = 0
+    # List of relevance scores (0.0-1.0), one per retrieved chunk in
+    # the most recent grading pass. Used by grade_documents node to
+    # report what it saw, and by downstream nodes to decide hedging.
+    retrieval_grades: List[float] = []
+    # True if retrieval_grades indicate poor relevance (all below
+    # threshold). Triggers uncertainty signaling in aggregation and UI.
+    low_confidence: bool = False

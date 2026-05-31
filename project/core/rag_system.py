@@ -17,6 +17,7 @@ class RAGSystem:
         self.chunker = DocumentChuncker()
         self.observability = Observability()
         self.agent_graph = None
+        self.agent_subgraph = None
         self.thread_id = str(uuid.uuid4())
         self.recursion_limit = config.GRAPH_RECURSION_LIMIT
 
@@ -26,7 +27,7 @@ class RAGSystem:
 
         llm = ChatOllama(model=config.LLM_MODEL, temperature=config.LLM_TEMPERATURE)
         tools = ToolFactory(collection).create_tools()
-        self.agent_graph = create_agent_graph(llm, tools)
+        self.agent_graph, self.agent_subgraph = create_agent_graph(llm, tools)
 
     def get_config(self):
         cfg = {"configurable": {"thread_id": self.thread_id}, "recursion_limit": self.recursion_limit}

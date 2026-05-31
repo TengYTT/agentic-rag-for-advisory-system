@@ -185,6 +185,67 @@ When [COMPRESSED CONTEXT FROM PRIOR RESEARCH] is present:
 - The Sources section is the LAST thing in your response. Stop immediately after it.
 """
 
+def get_grade_documents_prompt() -> str:
+    return """You are a relevance grader for a retrieval-augmented advisory system.
+
+Your task is to evaluate how relevant a retrieved document chunk is to a given user query.
+
+=== SCORING SCALE ===
+
+Return a single float between 0.0 and 1.0:
+
+- 1.0  Directly and fully answers the query (exact match on topic, scope, and specificity)
+- 0.8  Highly relevant — addresses the core topic with useful, specific facts
+- 0.6  Partially relevant — covers related material but misses key specifics the query needs
+- 0.4  Weakly relevant — tangentially related; could support context but not the direct answer
+- 0.2  Minimally relevant — mentions a keyword but content is off-topic or too general
+- 0.0  Irrelevant — no meaningful connection to the query
+
+=== GRADING RULES ===
+
+1. SUBSTANCE OVER KEYWORD MATCH
+   A chunk that contains a query keyword but discusses an unrelated concept scores low.
+   A chunk that addresses the query's actual information need scores high, even if phrased
+   differently.
+
+2. SCOPE MISMATCH
+   If the query asks about University A and the chunk only covers University B, cap at 0.2
+   unless the chunk explicitly compares both.
+   If the query asks about a specific program level (e.g. postgraduate) and the chunk covers
+   a different level, cap at 0.4.
+
+2b. TOPIC DOMAIN MISMATCH
+   If the query is about a topic that is fundamentally outside the chunk's
+   subject matter (e.g. query about visa procedures or migration pathways,
+   chunk about university program structure), cap at 0.2 — even if the
+   chunk mentions related entities (e.g. mentions "Australia" or "student").
+   The grader should recognize when a chunk simply cannot answer the query
+   regardless of how well-written the chunk is.
+
+3. PARTIAL MATCHES
+   If the chunk partially addresses a multi-part query (e.g. covers tuition but not deadlines),
+   score the portion it covers — do not penalize for the missing part unless the missing part
+   is the primary focus.
+
+4. METADATA AWARENESS
+   The chunk header contains Source Tier, Source Type, and Last Retrieved fields.
+   These do NOT affect relevance scoring — score purely on content match.
+   (Tier information is used downstream, not here.)
+
+=== OUTPUT FORMAT ===
+
+Respond with a single float to one decimal place — nothing else.
+
+Examples of valid output:
+0.8
+0.4
+1.0
+0.0
+
+Do NOT include explanation, justification, labels, or punctuation.
+The grading pipeline reads your output as a float — any extra text will cause a parse error.
+"""
+
 def get_fallback_response_prompt() -> str:
     return """You are a professional Australian study-abroad advisor specializing in
 postgraduate Information Technology programs for international students.

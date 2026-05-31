@@ -1,4 +1,5 @@
 from typing import Literal, Set
+import re
 from langchain_core.messages import SystemMessage, HumanMessage, RemoveMessage, AIMessage, ToolMessage
 from langgraph.types import Command
 from .graph_state import State, AgentState
@@ -6,6 +7,9 @@ from .schemas import QueryAnalysis
 from .prompts import *
 from utils import estimate_context_tokens
 from config import BASE_TOKEN_THRESHOLD, TOKEN_GROWTH_FACTOR
+
+GRADE_THRESHOLD = 0.5
+GRADE_PARSE_FALLBACK = 0.5
 
 def summarize_history(state: State, llm):
     if len(state["messages"]) < 4:
@@ -92,6 +96,61 @@ def fallback_response(state: AgentState, llm):
     )
     response = llm.invoke([SystemMessage(content=get_fallback_response_prompt()), HumanMessage(content=prompt_content)])
     return {"messages": [response]}
+
+def _parse_grade(response_content: str) -> float:
+    """Extract a float between 0.0 and 1.0 from LLM response.
+    Falls back to GRADE_PARSE_FALLBACK on failure.
+    """
+    match = re.search(r"(\d*\.?\d+)", response_content.strip())
+    if not match:
+        return GRADE_PARSE_FALLBACK
+    try:
+        score = float(match.group(1))
+        return max(0.0, min(1.0, score))
+    except ValueError:
+        return GRADE_PARSE_FALLBACK
+
+def grade_documents(state: AgentState, llm):
+    """LLM-as-judge: grade retrieved chunks for relevance to the query.
+    Updates state with retrieval_grades and low_confidence signal.
+    """
+    last_tool_msg = None
+    for msg in reversed(state["messages"]):
+        if isinstance(msg, ToolMessage):
+            last_tool_msg = msg
+            break
+
+    if last_tool_msg is None or not last_tool_msg.content.strip():
+        return {"retrieval_grades": [], "low_confidence": True}
+
+    content = last_tool_msg.content.strip()
+    no_result_sentinels = {"NO_RELEVANT_CHUNKS", "NO_PARENT_DOCUMENT", "NO_PARENT_DOCUMENTS"}
+    if content in no_result_sentinels:
+        return {"retrieval_grades": [], "low_confidence": True}
+    if content.startswith("RETRIEVAL_ERROR") or content.startswith("PARENT_RETRIEVAL_ERROR"):
+        return {"retrieval_grades": [], "low_confidence": True}
+
+    chunks = [c.strip() for c in content.split("\n\n") if c.strip()]
+    if not chunks:
+        return {"retrieval_grades": [], "low_confidence": True}
+
+    grade_prompt = SystemMessage(content=get_grade_documents_prompt())
+    user_query = state.get("question", "")
+    grades = []
+
+    for chunk in chunks:
+        grading_input = HumanMessage(content=(
+            f"USER QUERY:\n{user_query}\n\n"
+            f"DOCUMENT CHUNK:\n{chunk}"
+        ))
+        response = llm.invoke([grade_prompt, grading_input])
+        score = _parse_grade(response.content)
+        grades.append(score)
+
+    top_grade = max(grades) if grades else 0.0
+    low_conf = top_grade < GRADE_THRESHOLD
+
+    return {"retrieval_grades": grades, "low_confidence": low_conf}
 
 def should_compress_context(state: AgentState) -> Command[Literal["compress_context", "orchestrator"]]:
     messages = state["messages"]
