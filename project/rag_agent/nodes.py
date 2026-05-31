@@ -1,12 +1,14 @@
 from typing import Literal, Set
+import os
 import re
+import yaml
 from langchain_core.messages import SystemMessage, HumanMessage, RemoveMessage, AIMessage, ToolMessage
 from langgraph.types import Command
 from .graph_state import State, AgentState
 from .schemas import QueryAnalysis
 from .prompts import *
 from utils import estimate_context_tokens
-from config import BASE_TOKEN_THRESHOLD, TOKEN_GROWTH_FACTOR
+from config import BASE_TOKEN_THRESHOLD, TOKEN_GROWTH_FACTOR, MARKDOWN_DIR
 
 GRADE_THRESHOLD = 0.5
 GRADE_PARSE_FALLBACK = 0.5
@@ -228,9 +230,73 @@ def collect_answer(state: AgentState):
     answer = last_message.content if is_valid else "Unable to generate an answer."
     return {
         "final_answer": answer,
-        "agent_answers": [{"index": state["question_index"], "question": state["question"], "answer": answer}]
+        "agent_answers": [{"index": state["question_index"], "question": state["question"], "answer": answer, "low_confidence": state.get("low_confidence", False)}]
     }
 # --- End of Agent Nodes---
+
+def _load_source_metadata(filename: str, markdown_dir: str = MARKDOWN_DIR) -> dict:
+    """Re-read YAML front matter from a markdown file to get trust metadata.
+    Returns dict with keys: tier, source_type, primary_url, last_retrieved.
+    All values may be None if YAML is missing or filename not found.
+    """
+    _empty = {"tier": None, "source_type": None, "primary_url": None, "last_retrieved": None}
+    filepath = os.path.join(markdown_dir, filename)
+    if not os.path.isfile(filepath):
+        return _empty
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception:
+        return _empty
+    match = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL).match(content)
+    if not match:
+        return _empty
+    try:
+        meta = yaml.safe_load(match.group(1)) or {}
+    except yaml.YAMLError:
+        meta = {}
+    last_retrieved = meta.get("last_retrieved")
+    if last_retrieved is not None:
+        last_retrieved = str(last_retrieved)
+    return {
+        "tier": meta.get("source_tier"),
+        "source_type": meta.get("source_type"),
+        "primary_url": meta.get("primary_url"),
+        "last_retrieved": last_retrieved,
+    }
+
+def _build_final_message(aggregated_text: str, sub_answers: list) -> str:
+    """Wrap LLM-aggregated answer with low-confidence banner (if any) and
+    trust footer. Both are code-generated from metadata, not LLM-generated.
+    """
+    any_low_conf = any(a.get("low_confidence", False) for a in sub_answers)
+    banner = (
+        "> ⚠️ **Low confidence notice**: The available knowledge base may not "
+        "fully address this query. The response below is based on partial "
+        "information; please verify at the official sources listed in the "
+        "references section.\n\n"
+    ) if any_low_conf else ""
+
+    source_filenames = {m.group(1) for m in re.finditer(r"\b([\w\-]+\.md)\b", aggregated_text)}
+
+    footer_lines = ["\n\n📊 **Trust Signals**"]
+    if not source_filenames:
+        footer_lines.append(
+            "- ℹ️ No internal source documents were used. "
+            "Please consult the official references mentioned in the response above."
+        )
+    else:
+        for filename in sorted(source_filenames):
+            meta = _load_source_metadata(filename)
+            footer_lines.append(f"- 🏛️ **{filename}**")
+            if meta["tier"] is not None:
+                footer_lines.append(f"  - Source Tier: {meta['tier']} ({meta['source_type'] or 'unknown'})")
+            if meta["primary_url"]:
+                footer_lines.append(f"  - 🔗 {meta['primary_url']}")
+            if meta["last_retrieved"]:
+                footer_lines.append(f"  - 📅 Retrieved: {meta['last_retrieved']}")
+
+    return banner + aggregated_text + "\n".join(footer_lines)
 
 def aggregate_answers(state: State, llm):
     if not state.get("agent_answers"):
@@ -244,4 +310,6 @@ def aggregate_answers(state: State, llm):
 
     user_message = HumanMessage(content=f"""Original user question: {state["originalQuery"]}\nRetrieved answers:{formatted_answers}""")
     synthesis_response = llm.invoke([SystemMessage(content=get_aggregation_prompt()), user_message])
-    return {"messages": [AIMessage(content=synthesis_response.content)]}
+    aggregated_text = synthesis_response.content
+    final_text = _build_final_message(aggregated_text, sorted_answers)
+    return {"messages": [AIMessage(content=final_text)]}
